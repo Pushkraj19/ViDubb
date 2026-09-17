@@ -1,5 +1,11 @@
 import os
-import importlib.util
+os.environ.setdefault("TF_USE_LEGACY_KERAS", "1")
+import ssl
+import certifi
+os.environ['SSL_CERT_FILE'] = certifi.where()
+import ssl as _ssl
+_ssl._create_default_https_context = _ssl.create_default_context
+import ssl  # noqa: E402  (re-import keeps module object consistent for nltk)
 from ascii_magic import AsciiArt
 
 my_art = AsciiArt.from_image('Vidubb_without_bg.png')
@@ -7,19 +13,6 @@ my_art.to_terminal()
 
 
 print("Start Processing...")
-def install_if_not_installed(import_name, install_command):
-    try:
-        __import__(import_name)
-    except ImportError:
-        os.system(f"{install_command} > /dev/null 2>&1")
-
-install_if_not_installed('protobuf', 'pip install protobuf==3.19.6')
-install_if_not_installed('spacy', 'pip install spacy==3.8.2')
-install_if_not_installed('TTS', 'pip install --no-deps TTS==0.21.0')
-install_if_not_installed('packaging', 'pip install packaging==20.9')
-install_if_not_installed('openai-whisper', 'pip install openai-whisper==20240930')
-install_if_not_installed('deepface', 'pip install deepface==0.0.93')
-os.system('pip install numpy==1.26.4 > /dev/null 2>&1')
 
 from pyannote.audio import Pipeline
 from audio_separator.separator import Separator
@@ -36,12 +29,6 @@ import cv2
 import json
 import re
 from groq import Groq
-from IPython.display import HTML, Audio
-from base64 import b64decode
-from scipy.io.wavfile import read as wav_read
-import io
-import ffmpeg
-from IPython.display import clear_output 
 import sys, argparse
 from dotenv import load_dotenv
 import nltk
@@ -55,6 +42,7 @@ from tools.utils import cosine_similarity
 from tools.utils import extract_and_save_most_common_face
 from tools.utils import get_overlap
 from faster_whisper import WhisperModel
+from tools.device import select_device, whisper_options
 
         
 nltk.download('punkt')
@@ -75,6 +63,8 @@ parser.add_argument('--Bg_sound', type=bool, help='Keep the background sound of 
 
 
 
+parser.add_argument('--device', choices=['auto', 'cuda', 'mps', 'cpu'], default='auto',
+                    help='Lip-sync device; auto prefers CUDA, then MPS, then CPU. Whisper uses CPU on MPS.')
 args = parser.parse_args()
 
 
@@ -82,7 +72,11 @@ args = parser.parse_args()
 class VideoDubbing:
     def __init__(self, Video_path, source_language, target_language, 
                  LipSync=True, Voice_denoising = True, whisper_model="medium",
-                 Context_translation = "API code here", huggingface_auth_token="API code here"):
+                 Context_translation = "API code here", huggingface_auth_token="API code here", device='auto'):
+        self.device = select_device(device)
+        device = torch.device('cuda' if self.device == 'cuda' else 'cpu')
+        print(f'Wav2Lip/SFD: {self.device}; Whisper: {whisper_options(self.device)}; TTS/diarization/emotion: {device}')
+        # ponytail: MPS is verified for Wav2Lip/SFD only; validate other models before moving them off CPU.
         
         self.Video_path = Video_path
         self.source_language = source_language
@@ -100,7 +94,6 @@ class VideoDubbing:
 
         os.system("rm -r results")
         os.system("mkdir results")
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         # Initialize the pre-trained speaker diarization pipeline
         pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization",
@@ -248,7 +241,7 @@ class VideoDubbing:
         
         most_occured_speaker= max(list(speakers_rolls.values()),key=list(speakers_rolls.values()).count)
         
-        model = WhisperModel(self.whisper_model, device='cuda')
+        model = WhisperModel(self.whisper_model, **whisper_options(self.device))
         segments, info = model.transcribe(self.Video_path, word_timestamps=True)
         segments = list(segments) 
 			 
@@ -414,7 +407,7 @@ class VideoDubbing:
                         """,
                     }
                 ],
-                model="llama3-70b-8192",
+                model="openai/gpt-oss-120b",
             )
             # return chat_completion.choices[0].message.content
                 # Regex pattern to extract the translation
@@ -477,7 +470,7 @@ class VideoDubbing:
         
         
         os.environ["COQUI_TOS_AGREED"] = "1"
-        if device == "cuda":
+        if device.type == "cuda":
                 tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2", gpu=True)
         else:
                 tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2", gpu=False)
@@ -633,13 +626,15 @@ class VideoDubbing:
             save_audio("audio/enhanced.wav", enhanced, df_state.sr())"""
             command = f"ffmpeg -i '{self.Video_path}' -i audio/output.wav -c:v copy -map 0:v:0 -map 1:a:0 -shortest denoised_video.mp4"
             subprocess.run(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if self.LipSync and self.Voice_denoising:
-            os.system("pip install librosa==0.9.1 > /dev/null 2>&1")
-            os.system("cd Wav2Lip && python inference.py --checkpoint_path 'wav2lip_gan.pth' --face '../denoised_video.mp4' --audio '../audio/output.wav' --face_det_batch_size 1 --wav2lip_batch_size 1")
-            
-        if self.LipSync and not self.Voice_denoising:
-            os.system("pip install librosa==0.9.1 > /dev/null 2>&1")
-            os.system("cd Wav2Lip && python inference.py --checkpoint_path 'wav2lip_gan.pth' --face '../output_video.mp4' --audio '../audio/combined_audio.wav' --face_det_batch_size 1 --wav2lip_batch_size 1")
+        if self.LipSync:
+            face_path = '../denoised_video.mp4' if self.Voice_denoising else '../output_video.mp4'
+            audio_path = '../audio/output.wav' if self.Voice_denoising else '../audio/combined_audio.wav'
+            subprocess.run([
+                sys.executable, 'inference.py', '--device', self.device,
+                '--checkpoint_path', 'wav2lip_gan.pth', '--face', face_path,
+                '--audio', audio_path, '--face_det_batch_size', '1',
+                '--wav2lip_batch_size', '1',
+            ], cwd='Wav2Lip', check=True)
 
 			 
         if  self.LipSync and self.Voice_denoising:
@@ -656,7 +651,8 @@ class VideoDubbing:
 
             shutil.move(source_path, destination_folder)
             os.remove('output_video.mp4')
-            os.remove('denoised_video.mp4')
+            if os.path.exists('denoised_video.mp4'):
+                os.remove('denoised_video.mp4')
 		
         elif not self.LipSync and self.Voice_denoising:
             source_path = 'denoised_video.mp4'
@@ -670,19 +666,24 @@ class VideoDubbing:
 
             shutil.move(source_path, destination_folder)
 	
-        os.system('pip install -r requirements.txt > /dev/null 2>&1')	
 
 def main():
+	select_device(args.device)
 	os.system("rm video_path.mp4")
 	video_path = None
 	if args.yt_url:
-		os.system(f"yt-dlp -f best -o 'video_path.mp4' --recode-video mp4 {args.yt_url}")
+		result = subprocess.run(
+			[sys.executable, "-m", "yt_dlp", "--js-runtimes", "node", "-o", "video_path.%(ext)s", "--merge-output-format", "mp4", args.yt_url],
+			stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+		print(result.stdout)
+		if not os.path.exists("video_path.mp4"):
+			raise RuntimeError("yt-dlp failed to download the video; see output above")
 		video_path = "video_path.mp4"
 
 	if not video_path:
 		video_path = args.video_url
 	
-	vidubb = VideoDubbing(video_path, args.source_language, args.target_language, args.LipSync, not args.Bg_sound, args.whisper_model, os.getenv('Groq_TOKEN'), os.getenv('HF_TOKEN'))
+	vidubb = VideoDubbing(video_path, args.source_language, args.target_language, args.LipSync, not args.Bg_sound, args.whisper_model, os.getenv('Groq_TOKEN'), os.getenv('HF_TOKEN'), device=args.device)
 	
 if __name__ == '__main__':
 	main()

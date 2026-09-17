@@ -8,6 +8,10 @@ import torch, face_detection
 from models import Wav2Lip
 import platform
 from skimage import metrics
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tools.device import select_device
+os.environ.setdefault('TF_USE_LEGACY_KERAS', '1')
 from deepface import DeepFace
 
 parser = argparse.ArgumentParser(description='Inference code to lip-sync videos in the wild using Wav2Lip models')
@@ -52,6 +56,8 @@ parser.add_argument('--rotate', default=False, action='store_true',
 parser.add_argument('--nosmooth', default=False, action='store_true',
 					help='Prevent smoothing face detections over a short temporal window')
 
+parser.add_argument('--device', choices=['auto', 'cuda', 'mps', 'cpu'], default='auto',
+                    help='Wav2Lip and face detector device; auto prefers CUDA, then MPS, then CPU')
 args = parser.parse_args()
 args.img_size = 96
 
@@ -196,15 +202,28 @@ def datagen(frames, mels):
 		yield img_batch, mel_batch, frame_batch, coords_batch
 
 mel_step_size = 16
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device = select_device(args.device)
 print('Using {} for inference.'.format(device))
 
+def _open_video_writer(path, fps, size):
+	# DIVX/MPEG-4 Part 2 isn't guaranteed in the OpenCV FFmpeg build shipped
+	# on Apple Silicon; fall back through widely-available codecs and verify isOpened.
+	for fourcc in ('DIVX', 'XVID', 'mp4v', 'MJPG'):
+		writer = cv2.VideoWriter(path,
+								cv2.VideoWriter_fourcc(*fourcc), fps, size)
+		if writer.isOpened():
+			return writer
+		writer.release()
+	raise RuntimeError('Could not open any VideoWriter codec for {}'.format(path))
+
 def _load(checkpoint_path):
+	# Legacy GAN checkpoints contain CUDA-saved tensors + optimizer state:
+	# torch>=2.6 defaults to weights_only=True and refuses CUDA tensors on CPU.
 	if device == 'cuda':
-		checkpoint = torch.load(checkpoint_path)
+		checkpoint = torch.load(checkpoint_path, weights_only=False)
 	else:
 		checkpoint = torch.load(checkpoint_path,
-								map_location=lambda storage, loc: storage)
+								map_location='cpu', weights_only=False)
 	return checkpoint
 
 def load_model(path):
@@ -295,8 +314,7 @@ def main():
 			print ("Model loaded")
 
 			frame_h, frame_w = full_frames[0].shape[:-1]
-			out = cv2.VideoWriter('temp/result.avi', 
-									cv2.VideoWriter_fourcc(*'DIVX'), fps, (frame_w, frame_h))
+			out = _open_video_writer('temp/result.avi', fps, (frame_w, frame_h))
 
 		img_batch = torch.FloatTensor(np.transpose(img_batch, (0, 3, 1, 2))).to(device)
 		mel_batch = torch.FloatTensor(np.transpose(mel_batch, (0, 3, 1, 2))).to(device)

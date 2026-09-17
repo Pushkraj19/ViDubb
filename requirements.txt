@@ -1,5 +1,16 @@
+torch==2.5.1
+torchvision==0.20.1
+torchaudio==2.5.1
 pyannote.audio==3.3.2
+flask
+pandas>=1.4,<2.0
 python-dotenv==1.0.1
+numpy==1.26.4
+opencv-python==4.10.0.84
+openai-whisper==20240930
+deepface==0.0.93
+protobuf==4.25.9; sys_platform == "darwin"
+tf_keras==2.15.1
 speechbrain==1.0.2
 audio-separator==0.24.1
 onnxruntime==1.20.1
@@ -43,11 +54,11 @@ pynndescent==0.5.13
 tzlocal==5.3.1
 hangul_romanize==0.1.0
 ascii-magic==2.3.0
-tensorflow==2.8.0rc0
+tensorflow==2.15.1
 jieba==0.42.1
 grpcio-status==1.33.2 
 scikit-image==0.23.2
-nltk==3.2.4
+nltk==3.8.1
 gradio==5.8.0
 faster-whisper==1.1.1
 transformers==4.46.3

@@ -14,13 +14,6 @@ import cv2
 import json
 import re
 from groq import Groq
-from IPython.display import HTML, Audio
-from base64 import b64decode
-from scipy.io.wavfile import read as wav_read
-import io
-import ffmpeg
-from IPython.display import clear_output 
-import sys, argparse
 import os
 
 def merge_overlapping_periods(period_dict):
